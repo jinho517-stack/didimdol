@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+  <title>디딤돌 데모</title>
+  <!-- 서버 없이 브라우저 안(Pyodide)에서 Streamlit 앱을 돌린다: stlite (Apache-2.0) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/browser@1.11.0/build/stlite.css" />
+  <style>
+    :root { --bg: #ffffff; --ink: #0b0b0b; --muted: #52514e; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0e1117; --ink: #f0efec; --muted: #c3c2b7; } }
+    body { margin: 0; background: var(--bg); color: var(--ink); font-family: 'Malgun Gothic', '맑은 고딕', sans-serif; }
+    #loading { padding: 48px 16px; text-align: center; color: var(--muted); line-height: 1.7; }
+    #loading b { color: var(--ink); font-size: 1.15rem; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div id="loading"><b>디딤돌 데모를 불러오는 중입니다</b><br />
+      처음 열 때 브라우저에 파이썬을 내려받느라 30초~1분쯤 걸립니다.<br />
+      모든 데이터는 가상(합성) 데이터이며, 작업 내용은 이 브라우저 안에만 남습니다.</div>
+  </div>
+  <script type="module">
+    import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@1.11.0/build/stlite.js";
+
+    const files = [
+      "app.py", "catalog.py", "compare.py", "db.py", "draft.py", "extract.py", "llm.py", "query.py", "resolver.py",
+      "config.yaml", "templates/report_template.hwpx",
+      "sample/candidates_sample.csv", "sample/extra/candidates_extra.csv", "sample/other/candidates_other.csv",
+    ];
+    mount(
+      {
+        entrypoint: "app.py",
+        requirements: ["pandas", "openpyxl", "python-docx", "pyyaml", "altair"],
+        prebuiltPackageNames: ["sqlite3"],
+        files: Object.fromEntries(files.map((p) => [p, { url: "./" + encodeURI(p) }])),
+        streamlitConfig: { "browser.gatherUsageStats": false, "client.toolbarMode": "viewer" },
+      },
+      document.getElementById("root"),
+    );
+  </script>
+</body>
+</html>
