@@ -81,6 +81,12 @@ def save_document(con, doc, cands):
     con.commit()
 
 
+def delete_document(con, doc_id):
+    con.execute('delete from candidates where doc_id=?', (doc_id,))
+    con.execute('delete from sources where doc_id=?', (doc_id,))
+    con.commit()
+
+
 def update_source_meta(con, doc_id, stage, date, version_kind, district=None):
     con.execute('update sources set stage=?, date=?, version_kind=?, district=coalesce(?, district) where doc_id=?',
                 (stage, date, version_kind or '', district, doc_id))

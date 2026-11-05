@@ -30,9 +30,9 @@ def fmt_value(v, unit=''):
 
 
 def short_date(d):
-    """2026-10-06 → ’26.10.06."""
+    """2026-10-06 → ’26. 10. 6. (회사 보고서 표기: 년·월·일 글자 대신 온점)"""
     m = re.fullmatch(r'20(\d\d)-(\d\d)-(\d\d)', d or '')
-    return f'’{m.group(1)}.{m.group(2)}.{m.group(3)}.' if m else (d or '')
+    return f'’{m.group(1)}. {int(m.group(2))}. {int(m.group(3))}.' if m else (d or '')
 
 
 # ---------- 보고서 목차(섹션)와 양식 ----------
@@ -149,13 +149,19 @@ def build(facts, cands, sources, choices, title='', district='', dept='', sectio
                     body.append(('b', '확인 필요', ', '.join(f"{f['facility']} {f['item']}" for f in pending)))
 
         elif sec == '사업개요':
-            items = sorted(OrderedDict.fromkeys(f['item'] for f in facts if not narr(f['item'])),
-                           key=lambda i: (item_rank.get(i, 999), i))
+            # 열 합치기(A4 한 장 폭): 개통목표 → 완료(개통), 지원액 → 사업비. 수치 열 다음에 시행주체·추진상태
+            merge = {'개통목표': '완료시기', '지원액': '사업비'}
+            label = {'완료시기': '완료(개통)', '사업비': '사업비(억원)'}
+            present = OrderedDict.fromkeys(merge.get(f['item'], f['item']) for f in facts if not narr(f['item']))
+            items = sorted(present, key=lambda i: (kinds.get(i) in ('attr', 'status'), item_rank.get(i, 999), i))
             units = {f['item']: f['unit'] for f in facts if f['unit'] and f['unit'] != f['item']}
-            cols = ['사업명'] + [f"{i}({units[i]})" if i in units else i for i in items] + (['근거'] if show_basis else [])
+            cols = ['사업명'] + [label.get(i) or (f"{i}({units[i]})" if i in units else i) for i in items] + \
+                (['근거'] if show_basis else [])
             rows = []
             for fac, fs in by_fac.items():
-                m = {f['item']: f for f in fs}
+                m = {}
+                for f in fs:
+                    m.setdefault(merge.get(f['item'], f['item']), f)
                 srcs = list(OrderedDict.fromkeys(f['source_doc'] for f in fs if f['source_doc']))
                 rows.append([fac] + [('확인 필요' if m[i]['status'] == '미확정(충돌)' else fmt_value(m[i]['value']))
                                      if i in m else '-' for i in items] + ([', '.join(srcs)] if show_basis else []))
@@ -311,6 +317,12 @@ def build(facts, cands, sources, choices, title='', district='', dept='', sectio
     if show_basis:
         B.append(('note', '주) 근거는 출처 문서(문서ID). 판정 근거·변경 이력은 디딤돌 대시보드에서 확인. '
                           '본 초안은 자동 작성본으로 담당자 검토 후 사용'))
+    # 핵심요약(◈, 회사 양식의 요약 상자): 사업 수·확인 필요·현안 사업 / 양식 적용에 쓰는 정보(meta)
+    issue_facs = list(of_kind('issue'))
+    summary = f'{district} 광역교통개선대책 {len(by_fac)}개 사업 추진현황' + \
+        (f', 현안 {len(issue_facs)}건({", ".join(issue_facs[:2])}{" 등" if len(issue_facs) > 2 else ""})' if issue_facs else '') + \
+        (f', 확인 필요 {len(pending)}건' if pending else '') + ' 정리'
+    B[2:2] = [('summary', summary), ('meta', {'district': district, 'dept': dept, 'date': today.strftime('%Y-%m-%d')})]
     return B
 
 
@@ -319,7 +331,9 @@ def llm_opinion(blocks, cfg=None):
     try:
         data = llm.ask_json(
             f'[보고서 초안]\n{text}\n\n위 초안을 읽고 "종합 의견" 2~3개를 공공기관 개조식 한 문장씩 써라. '
-            '초안에 없는 숫자·사실은 쓰지 않는다. 출력 형식: {"opinions": ["...", "..."]}',
+            '초안에 없는 숫자·사실은 쓰지 않는다. 회사 보고서 작성 원칙을 따른다: 한 항목은 2줄 이내·한 가지 내용, '
+            '명사·동사 위주의 능동형, 시제를 명확히(~함, ~중, ~예정), 미사여구·과장 표현 금지, 날짜는 ’26. 11. 4. 형식. '
+            '출력 형식: {"opinions": ["...", "..."]}',
             system='너는 공공기관 보고서 검토를 돕는 도구다.', cfg=cfg)
         ops = [o for o in data.get('opinions', []) if isinstance(o, str) and o.strip()][:3]
         return [('b', None, o.strip()) for o in ops] or [('b', None, 'AI 의견 없음')]
@@ -334,6 +348,8 @@ def line(b):
         return b[1]
     if k in ('date', 'h', 'note'):
         return b[1]
+    if k == 'summary':
+        return f'◈ {b[1]}'
     if k == 'b':
         return f" ㅇ ({b[1]}) {b[2]}" if b[1] else f" ㅇ {b[2]}"
     if k == 's':
@@ -350,7 +366,7 @@ def to_text(blocks):
             out.append(f'< {b[1]} >')
             out.append(' | '.join(b[2]))
             out += [' | '.join(r) for r in b[3]]
-        else:
+        elif b[0] != 'meta':
             out.append(line(b))
     return '\n'.join(out)
 
@@ -365,6 +381,8 @@ def to_html(blocks):
             out.append(f'<div class="rp-title"><div>{e(b[1])}</div>{sub}</div>')
         elif k == 'date':
             out.append(f'<div class="rp-date">{e(b[1])}</div>')
+        elif k == 'summary':
+            out.append(f'<div class="rp-b" style="background:#fffbe6;padding:6px 10px;margin:4px 0 8px">◈ {e(b[1])}</div>')
         elif k == 'h':
             out.append(f'<div class="rp-h">{e(b[1])}</div>')
         elif k == 'b':
@@ -436,6 +454,8 @@ def to_docx(blocks):
                 r2.font.size, r2.font.color.rgb = Pt(9), RGBColor(0x52, 0x51, 0x4E)
         elif k == 'date':
             para(b[1], size=10, align=WD_ALIGN_PARAGRAPH.RIGHT, after=8)
+        elif k == 'summary':
+            para('◈ ' + b[1], size=11, after=6)
         elif k == 'h':
             para(b[1], bold=True, size=13, after=4).paragraph_format.space_before = Pt(10)
         elif k == 'b':
@@ -525,7 +545,7 @@ def to_hwpx(blocks, template=TEMPLATE):
             out += [_fill(proto_h, [b[1]]), _fill(proto_hblank, [])]
         elif k == 'b':
             out.append(_fill(proto_kb, [' ㅇ ', f'({b[1]})', f' {b[2]}']) if b[1] else _fill(proto_plain, [f' ㅇ {b[2]}']))
-        elif k in ('s', 'act', 'note'):
+        elif k in ('s', 'act', 'note', 'summary'):
             out.append(_fill(proto_plain, [line(b) if k != 'note' else b[1]]))
         elif k == 'table':  # 한글본은 표 대신 '< 표 제목 >' + 행마다 '- 사업명: 열 값, ...'으로 쓴다
             out.append(_fill(proto_plain, [f' < {b[1]} >']))

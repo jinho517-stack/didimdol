@@ -219,3 +219,193 @@ def extract_candidates(doc, items, cfg=None, text=None):
                     'value': v, 'unit': units[k], 'location': str(f.get('location') or '')})
     meta = {k: data.get(k) for k in ('stage', 'date', 'version_kind')}
     return out, meta
+
+
+# ---------- 간이 추출(키 없을 때): 규칙으로 값 찾기 ----------
+# 표: 머리글 행(연장·차로·사업비·완료 …)을 읽어 같은 표의 사업 행에서 칸별 값을 가져온다. "당초 | 변경" 표는 변경 값을 쓴다.
+# 본문: 사업명이 나온 줄에서 "연장 2.1km", "4차로", "사업비 520억원", "완료 2031.6" 같은 표현을 찾는다.
+# 문장형: "현안·향후계획" 제목 아래 "ㅇ (사업명) 내용" 줄, 또는 표의 해당 칸. 결과는 화면에서 확인한 뒤 저장한다.
+HEADER_ITEMS = [('시행주체', '시행주체'), ('추진상태', '추진상태'), ('현안', '현안'), ('조치계획', '향후계획'),
+                ('향후계획', '향후계획'), ('연장', '연장'), ('차로', '차로'), ('사업비', '사업비'), ('지원', '지원액'),
+                ('규모', '규모'), ('완료', '@완료'), ('준공', '@완료'), ('개통', '@개통')]
+LOC = re.compile(r'^\[([^\]]+)\]\s*')
+BULLET = re.compile(r'^\s*(?:ㅇ|o|○|-|·|\d+\)|[가-하]\.)?\s*\(([^()]+(?:\([^)]*\))?[^()]*)\)\s*[:：]?\s*(.+)$')
+UNIT_HINT = {'연장': 'km', '차로': '차로', '규모': '㎡'}
+TEXT_ITEMS = ('시행주체', '추진상태', '현안', '향후계획')
+
+
+def _ns(s):
+    return re.sub(r'\s+', '', s or '')
+
+
+def _aliases(facilities):
+    """사업명 → 찾을 낱말들(띄어쓰기 무시). 괄호 앞 이름, 다른 사업과 겹치지 않는 첫 낱말도 쓴다."""
+    out = {}
+    firsts = [f.split()[0] for f in facilities if ' ' in f]
+    for f in facilities:
+        al = {_ns(f), _ns(re.sub(r'\(.*?\)', '', f))}
+        w = f.split()[0]
+        if ' ' in f and len(w) >= 3 and firsts.count(w) == 1:
+            al.add(_ns(w))
+        out[f] = sorted((a for a in al if len(a) >= 2), key=len, reverse=True)
+    return out
+
+
+def _time(y, m):
+    return f'{y}.{int(m)}'
+
+
+def _from_segment(seg, items, support=False, last=False):
+    """띄어쓰기를 지운 조각에서 값 찾기 → {항목: 값}. support: 지원사업(금액은 지원액). last: 여러 값이면 마지막(변경 후)."""
+    def pick(pat):
+        ms = list(re.finditer(pat, seg))
+        return (ms[-1] if last else ms[0]) if ms else None
+    got = {}
+    m = pick(r'(?:연장|L=)([\d.]+)km') or pick(r'([\d.]+)km')
+    if m and '연장' in items:
+        got['연장'] = m.group(1)
+    m = pick(r'(\d+)차로')
+    if m and '차로' in items:
+        got['차로'] = m.group(1)
+    if not re.search(r'→|증액|증가|요구|에서[\d,]+억', seg):  # 변경 요구·증액 문장의 금액은 값으로 보지 않음
+        m = pick(r'([\d,]+(?:\.\d+)?)억원?')
+        if m:
+            sup = support or '지원' in seg[:m.start()] or '사업비' not in items
+            key = '지원액' if sup and '지원액' in items else '사업비'
+            if key in items:
+                got[key] = m.group(1).replace(',', '')
+    m = pick(r'([\d,]+)㎡')
+    if m and '규모' in items:
+        got['규모'] = m.group(1).replace(',', '')
+    for m in re.finditer(r'(20\d\d)[.\-년](\d{1,2})(?![\d.])', seg):
+        around = seg[max(0, m.start() - 8):m.end() + 6]
+        if re.search(r'완료|개통|준공', around):
+            key = '개통목표' if '개통목표' in items and ('개통' in around or '완료시기' not in items) else '완료시기'
+            if key in items:
+                got[key] = _time(m.group(1), m.group(2))
+            break
+    return got
+
+
+def rule_extract(doc, items, text=None):
+    """문서 하나 → 후보 목록(LLM 없이). items: 그 지구의 항목 목록(catalog.items_for)."""
+    text = text if text is not None else read_text(doc['path'])
+    by_fac = {}
+    for i in items:
+        by_fac.setdefault(i['facility'], {})[i['item']] = i.get('unit') or ''
+    aliases = _aliases(list(by_fac))
+    found, headers, raw_head = {}, {}, {}
+    section, last_fac, mentioned = None, None, []
+
+    def put(fac, item, value, loc):
+        value = re.sub(r'\s+', ' ', str(value)).strip(' ,·|')
+        if item in by_fac.get(fac, {}) and value and value not in ('-', '—'):
+            found.setdefault((fac, item), (value, loc))  # 같은 문서 안에서는 처음 나온 값
+
+    def facs_in(s):
+        ns, hits = _ns(s), []
+        for fac, als in aliases.items():
+            for a in als:
+                p = ns.find(a)
+                if p >= 0:
+                    hits.append((p, p + len(a), fac))
+                    break
+        out = []  # 같은 자리에서 겹치면 더 긴 이름(예: "미리내선(광역철도)" > "미리내")
+        for h in sorted(hits, key=lambda h: (h[0], -(h[1] - h[0]))):
+            if not out or h[0] >= out[-1][1]:
+                out.append(h)
+        return out
+
+    for n, line in enumerate(text.splitlines(), 1):
+        m = LOC.match(line)
+        loc, body = (m.group(1), line[m.end():]) if m else (f'{n}번째 줄', line)
+        if not body.strip():
+            continue
+        if '|' in body:  # 표의 행
+            table = re.sub(r'\s*\d+행$', '', loc)
+            raw_head.setdefault(table, body)
+            changed = bool(re.search(r'당초|기존|변경\s*전', raw_head[table]))
+            cells = [c.strip() for c in body.split('|')]
+            cols = {}
+            for ci, c in enumerate(cells):
+                for word, item in HEADER_ITEMS:
+                    if word in _ns(c) and item not in cols:
+                        cols[item] = ci
+                        break
+            if len(cols) >= 2 and not facs_in(cells[0] + (cells[1] if len(cells) > 1 else '')):
+                headers[table] = cols
+                continue
+            hits = facs_in(' '.join(cells[:2]))
+            if hits and table in headers:
+                fac = hits[0][2]
+                mentioned.append(fac)
+                items_f = by_fac[fac]
+                for item, ci in headers[table].items():
+                    if ci >= len(cells):
+                        continue
+                    c = cells[ci]
+                    if item in ('@완료', '@개통'):
+                        t = re.search(r'(20\d\d)[.\-년](\d{1,2})', _ns(c))
+                        if t:
+                            want = '개통목표' if item == '@개통' else '완료시기'
+                            other = '완료시기' if want == '개통목표' else '개통목표'
+                            put(fac, want if want in items_f else other, _time(*t.groups()), loc)
+                    elif item in TEXT_ITEMS:
+                        put(fac, item, c, loc)
+                    else:
+                        bare = re.fullmatch(r'[\d,.]+', _ns(c))
+                        if bare:  # 단위 없는 숫자: 머리글 항목으로
+                            key = '지원액' if item == '사업비' and '지원' in fac and '지원액' in items_f else item
+                            put(fac, key, _ns(c).replace(',', ''), loc)
+                        else:  # 단위가 적힌 칸: 단위로 항목을 정한다(예: 연장 칸의 12,000㎡ → 규모)
+                            for k2, x in _from_segment(_ns(c), items_f, support='지원' in fac).items():
+                                put(fac, k2, x, loc)
+                continue
+            if hits:  # 머리글 없는 표 행(예: 변경 항목 | 당초 | 변경): 본문처럼 읽되 변경 값을 쓴다
+                fac = hits[0][2]
+                mentioned.append(fac)
+                seg = _ns(body)[hits[0][1]:]
+                for item, v in _from_segment(seg, by_fac[fac], support='지원' in fac, last=changed).items():
+                    put(fac, item, v, loc)
+                continue
+        # 제목 줄: 아래 내용이 현안인지 계획인지 기억
+        head = re.match(r'^\s*(?:□|■|◇|\d+\.|[IVX]+\.)\s*(.{0,30})$', body)
+        if head:
+            t = _ns(head.group(1))
+            section = 'plan' if re.search(r'향후|계획|일정|조치', t) else \
+                'issue' if re.search(r'현안|결정|협의의견|협의결과|주요내용|쟁점', t) else None
+            last_fac = None
+            continue
+        b = BULLET.match(body)
+        bhit = facs_in(b.group(1)) if b else []
+        bfac = bhit[0][2] if bhit else None
+        if section and bfac:  # "ㅇ (사업명) 내용"
+            text_v = b.group(2).strip()
+            mentioned.append(bfac)
+            if section == 'plan':
+                put(bfac, '향후계획', text_v, loc)
+            elif len(_ns(text_v)) <= 20 and not re.search(r'[.다]$', text_v):
+                put(bfac, '추진상태', text_v, loc)
+            else:
+                put(bfac, '현안', text_v, loc)
+            last_fac = bfac
+        elif section == 'issue' and last_fac and re.match(r'^\s*-\s*', body):  # 바로 위 사업의 세부 내용
+            put(last_fac, '현안', re.sub(r'^\s*-\s*', '', body), loc)
+            continue
+        elif section == 'plan' and not facs_in(body) and len(set(mentioned)) == 1 and len(_ns(body)) > 6:
+            put(mentioned[0], '향후계획', body.strip(), loc)  # 사업 하나만 다루는 문서의 계획 문장
+            continue
+        # 본문 줄: 사업명이 나온 자리부터 다음 사업명 전까지를 그 사업의 내용으로 본다
+        hits = facs_in(body)
+        ns = _ns(body)
+        for k, (s_, e, fac) in enumerate(hits):
+            mentioned.append(fac)
+            seg = ns[e:hits[k + 1][0]] if k + 1 < len(hits) else ns[e:]
+            for item, v in _from_segment(seg, by_fac[fac], support='지원' in fac).items():
+                put(fac, item, v, loc)
+            for word in ('시행주체', '추진상태'):
+                t = re.search(word + r'\s*[:：]?\s*([^,·|]+)', body)
+                if t:
+                    put(fac, word, t.group(1), loc)
+    return [{'doc_id': doc['doc_id'], 'facility': f, 'item': it, 'value': v, 'unit': by_fac[f][it], 'location': loc}
+            for (f, it), (v, loc) in found.items()]

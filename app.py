@@ -1,6 +1,7 @@
-"""디딤돌 웹앱 (Streamlit).  실행: streamlit run app.py
-화면: 📊 대시보드(지구별: 확인 필요 선택 + 사업별 최신값 + 문서 흐름 + 항목 이력) / 🔎 통합 비교(여러 지구 사업 필터)
-/ 💬 질문하기(DB 검색 챗봇) / 📂 문서 / 📝 보고서·자료.
+"""디딤돌 웹앱 v3 (Streamlit).  실행: streamlit run app.py
+화면: 🏠 처음(검색창 + 문서 올리기/대시보드 선택 + DB의 사업지구). 그 밖의 화면은 상단 메뉴 줄로 오간다:
+📊 대시보드(지구별: 요약 숫자 4개 + 값 충돌 확정 + 사업 한 줄 목록(급한 순) + 고른 사업만 자세히 + 문서 흐름)
+/ 💬 챗봇(DB 검색) / 💾 DB(문서 관리 + 여러 지구 통합 비교) / 📝 보고서 작성.
 원본 문서는 읽기만 하고, DB·자료표·보고서·업로드 사본은 output/ 폴더에 만든다."""
 import json
 import re
@@ -17,13 +18,17 @@ import db
 import draft
 import extract
 import llm
+import hwpx_forms
+import lh_style
 import query
 from resolver import INFORMAL, norm
 
 BASE = Path(__file__).parent
 SAMPLE = BASE / 'sample'
 UPLOADS = db.OUTPUT / 'uploads'
-NAV = ['📊 대시보드', '🔎 통합 비교', '💬 질문하기', '📂 문서', '📝 보고서·자료']
+NAV = ['🏠 처음', '📊 대시보드', '💬 챗봇', '💾 DB', '📝 보고서 작성']  # 처음 화면 뒤로는 상단 메뉴 줄(처음 제외 4개)
+HOME, DASH, CHAT, DOCS, REPORT = NAV
+DB_VIEWS = ['📂 문서 관리', '🔎 통합 비교']
 # 지구 구분 색: 기준 팔레트 범주형 순서(파랑·주황·청록 …), 지구 순서대로 고정
 DISTRICT_COLOR = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948']
 NO_VERSION = '없음'
@@ -78,6 +83,47 @@ st.markdown("""<style>
 .rp-tw{overflow-x:auto}.rp-t{border-collapse:collapse;width:100%;font-size:.8rem;margin-bottom:6px}
 .rp-t th,.rp-t td{border:1px solid #999;padding:3px 6px;text-align:center}.rp-t th{background:#efefec}
 .rp-note{font-size:.8rem;margin-top:14px;color:#444}
+.v2-title{font-size:1.9rem;font-weight:700;margin:4px 0 0}
+.v2-sub{font-size:.92rem;opacity:.75;margin-bottom:12px}.v2-warn{color:#d03b3b}
+.v2-q{font-weight:600;margin:6px 0 2px}
+.v2-card{border:1px solid rgba(128,128,128,.25);border-left:5px solid;border-radius:12px;padding:12px 16px 10px;margin-bottom:6px}
+.v2-h{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.v2-name{font-size:1.08rem;font-weight:700}
+.v2-pill{font-size:.75rem;font-weight:700;border:1.5px solid;border-radius:10px;padding:0 8px;white-space:nowrap}
+.v2-status{font-size:.85rem;opacity:.8;margin:2px 0 8px}
+.v2-nums{display:flex;gap:22px;flex-wrap:wrap;margin-bottom:6px}
+.v2-n .v{font-size:1.25rem;font-weight:700;line-height:1.2}.v2-n .l{font-size:.72rem;opacity:.65}
+.v2-issue{font-size:.86rem;line-height:1.45;margin:4px 0 2px}
+.v2-plan{font-size:.8rem;opacity:.75;margin-bottom:4px}
+.v2-tag{display:inline-block;font-size:.72rem;padding:0 7px;margin:2px 4px 0 0;border-radius:8px;background:rgba(137,135,129,.14)}
+.v3-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:4px 0 14px}
+.v3-tile{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:8px 12px}
+.v3-tile .v{font-size:1.35rem;font-weight:700;line-height:1.2}.v3-tile .l{font-size:.75rem;opacity:.7}
+.v3-tile.warn{border-color:#d03b3b;background:rgba(208,59,59,.07)}.v3-tile.warn .v{color:#d03b3b}
+.v3-list{margin:6px 0 14px}
+.v3-row{display:grid;grid-template-columns:minmax(120px,1fr) 76px 84px minmax(84px,auto) 70px;
+        gap:2px 12px;align-items:center;padding:8px 10px;border-left:4px solid transparent;border-bottom:1px solid rgba(128,128,128,.16);
+        font-size:.88rem}
+.v3-head{font-size:.74rem;opacity:.65;font-weight:600;border-bottom:1px solid rgba(128,128,128,.35)}
+.v3-row .r{text-align:right;white-space:nowrap}.v3-row .b{font-weight:700}
+.v3-name{font-weight:700}
+.v3-issue{grid-column:1/-1;font-size:.78rem;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:640px){
+  .v3-tiles{grid-template-columns:repeat(2,1fr)}
+  .v3-head{display:none}
+  .v3-row{grid-template-columns:1fr auto}
+  .v3-row .r{text-align:left}.v3-row .r::before{content:attr(data-l) " ";opacity:.6;font-weight:400}
+  .v3-issue{white-space:normal}
+}
+.tn-line{border-bottom:1px solid rgba(128,128,128,.25);margin:-4px 0 10px}
+.st-key-tn_home button p{font-size:1.15rem;font-weight:800}
+.hm-logo{text-align:center;font-size:2.6rem;font-weight:800;margin:6vh 0 0;letter-spacing:-1px}
+.hm-sub{text-align:center;font-size:.95rem;opacity:.7;margin-bottom:18px}
+.st-key-home_q [data-baseweb="input"]{border-radius:24px;padding:4px 10px}
+.st-key-home_q input{font-size:1.02rem}
+.hm-sec{text-align:center;font-size:.8rem;font-weight:600;opacity:.65;margin:26px 0 6px}
+.hm-card{text-align:center;padding:4px 0 2px}.hm-card .i{font-size:1.8rem}.hm-card .t{font-size:1.05rem;font-weight:700}
+.hm-card .d{font-size:.8rem;opacity:.7;min-height:2.4em}
 </style>""", unsafe_allow_html=True)
 
 
@@ -168,230 +214,333 @@ def doc_meta_form(registered):
 
 
 def page_docs():
-    st.header('📂 문서')
-    st.caption('문서를 넣고 "추출 시작"을 누르면 항목별 최신값을 판정해 대시보드에 보여 줍니다. 원본 문서는 읽기만 합니다.')
-    modes = ['샘플 모드 (API 키 불필요)'] + (['실제 추출 (LLM)'] if HAS_LLM else [])
-    mode = st.radio('추출 방식', modes, horizontal=True, index=len(modes) - 1)
-    if not HAS_LLM:
-        st.info(f"환경변수 `{cfg.get('llm', {}).get('api_key_env')}`가 없어 샘플 모드로 동작합니다. "
-                'sample/의 A01 추출 결과 예시(CSV)로 판정 이후 흐름을 그대로 실행합니다.')
-
-    if mode.startswith('샘플'):
-        c1, c2 = st.columns(2)
-        extra = c1.checkbox('누리마루 현안 문서 7개 포함 (sample/extra)', value=True,
-                            help='지자체 반대·협의 지연, 노선별 현안·향후계획·시행주체. 끄면 정답표 기준 기본 11개만 씁니다.')
-        other = c2.checkbox('다른 지구 문서 8개 포함 (sample/other: 한빛·솔내지구)', value=True,
-                            help='통합 비교·질문하기용 가상 지구. 누리마루 판정 결과에는 영향이 없습니다.')
-        docs, cands = extract.load_sample(SAMPLE, extra, other, CAT['default'])
-        n_d = len({d['district'] for d in docs})
-        st.write(f'모의 문서 {len(docs)}개, 사업지구 {n_d}곳 (합성 데이터)')
-        doc_table(docs)
-        if st.button('추출 시작', type='primary'):
-            db.reset(con)  # 샘플 모드는 DB를 새로 만든다
-            for d in docs:
-                db.save_document(con, d, [c for c in cands if c['doc_id'] == d['doc_id']])
-            db.recompute(con, CAT['default'])
-            flash(f'샘플 추출 결과 {len(cands)}건을 불러와 지구별로 최신값을 판정했습니다.')
-            st.session_state['goto'] = NAV[0]
-            st.rerun()
+    st.caption('원본 문서는 읽기만 합니다. 올린 파일의 사본과 DB는 output/ 폴더에만 만듭니다.')
+    mode = st.segmented_control('문서 가져오기', ['📁 샘플(모의 문서)', '⬆ 내 문서 올리기'], default='⬆ 내 문서 올리기',
+                                key='doc_mode', label_visibility='collapsed') or '⬆ 내 문서 올리기'
+    if mode.startswith('📁'):
+        sample_section()
     else:
-        src = st.radio('문서 가져오기', ['폴더 경로', '파일 선택(여러 개)'], horizontal=True)
-        paths = []
-        if src == '폴더 경로':
-            folder = st.text_input('폴더 경로', str(SAMPLE))
-            if folder and Path(folder).is_dir():
-                paths = extract.list_folder(folder)
-            elif folder:
-                st.warning('폴더를 찾을 수 없습니다.')
-        else:
-            files = st.file_uploader('문서 선택', type=[e[1:] for e in extract.FORMATS], accept_multiple_files=True)
-            UPLOADS.mkdir(parents=True, exist_ok=True)
-            for f in files or []:  # 업로드 사본은 output/uploads에만 저장
-                p = UPLOADS / f.name
-                if not p.exists() or p.stat().st_size != f.size:
-                    p.write_bytes(f.getvalue())
-                paths.append(p)
-        if paths:
-            docs = extract.describe(paths, db.next_doc_num(con), CAT)
-            for d in docs:  # 이미 등록된 파일은 같은 문서ID로 교체
-                d['doc_id'] = db.doc_id_for_file(con, d['file']) or d['doc_id']
-            st.write(f'문서 {len(docs)}개. 지구·단계·일자는 파일명으로 추정한 값이며, 추출 후 아래에서 고칠 수 있습니다.')
-            doc_table(docs)
-            if st.button('추출 시작', type='primary'):
-                run_extraction(docs)
-                st.session_state['goto'] = NAV[0]
-                st.rerun()
+        upload_section()
 
     registered = db.sources(con)
     if not registered:
         show_flash()
         return
-    st.subheader('등록된 문서')
+    st.subheader(f'등록된 문서 {len(registered)}건')
     doc_table(registered, with_count=True)
     with st.container(border=True):
         st.markdown('**문서 지구·단계·일자·버전 수정** — 저장하면 전체 후보로 다시 판정합니다.')
         doc_meta_form(registered)
         show_flash()
-    if st.button('DB 초기화'):
+    c1, c2 = st.columns(2)
+    del_id = c1.selectbox('문서 빼기', ['—'] + [d['doc_id'] for d in registered], key='del_doc',
+                          format_func=lambda i: i if i == '—' else f"{i}  {next(d['file'] for d in registered if d['doc_id'] == i)}")
+    if c1.button('이 문서 빼고 다시 판정', disabled=del_id == '—'):
+        db.delete_document(con, del_id)
+        db.recompute(con, CAT['default'])
+        flash(f'{del_id}를 DB에서 뺐습니다. (원본 파일은 그대로입니다)')
+        st.rerun()
+    if c2.button('DB 초기화'):
         db.reset(con)
         flash('DB를 비웠습니다. (원본 문서는 그대로입니다)')
         st.rerun()
 
 
-def run_extraction(docs):
-    bar = st.progress(0.0, text='추출 중...')
-    errors, notes, n = [], [], 0
+def sample_section():
+    st.caption('가상 지구(누리마루·한빛·솔내) 모의 문서와 그 추출 예시로 판정 이후 흐름을 실행합니다. DB를 새로 만듭니다.')
+    c1, c2 = st.columns(2)
+    extra = c1.checkbox('누리마루 현안 문서 7개 포함', value=True)
+    other = c2.checkbox('다른 지구 문서 8개 포함 (한빛·솔내)', value=True)
+    docs, cands = extract.load_sample(SAMPLE, extra, other, CAT['default'])
+    with st.expander(f'모의 문서 {len(docs)}개 보기'):
+        doc_table(docs)
+    if st.button('샘플 불러오기', type='primary'):
+        db.reset(con)
+        for d in docs:
+            db.save_document(con, d, [c for c in cands if c['doc_id'] == d['doc_id']])
+        db.recompute(con, CAT['default'])
+        flash(f'샘플 추출 결과 {len(cands)}건을 불러와 지구별로 최신값을 판정했습니다.')
+        st.session_state['goto'] = DASH
+        st.rerun()
+
+
+NEW_DISTRICT = '＋ 새 사업지구 추가'
+
+
+def upload_section():
+    global CAT
+    how = 'AI 추출(LLM)' if HAS_LLM else '간이 추출(규칙, 키 없음)'
+    st.caption(f'문서를 올리고 사업지구를 고른 뒤 "값 뽑기"를 누르세요. 추출 방식: **{how}**. '
+               '뽑힌 값을 확인한 뒤 저장하면 기존 DB에 더해 판정합니다. 시험에는 가상·공개 자료를 쓰세요.')
+    files = st.file_uploader('문서 선택 (PDF·한글 hwpx·워드·엑셀·텍스트, 여러 개)', type=[e[1:] for e in extract.FORMATS],
+                             accept_multiple_files=True, key='up_files')
+    paths = []
+    UPLOADS.mkdir(parents=True, exist_ok=True)
+    for f in files or []:  # 업로드 사본은 output/uploads에만 저장
+        p = UPLOADS / f.name
+        if not p.exists() or p.stat().st_size != f.size:
+            p.write_bytes(f.getvalue())
+        paths.append(p)
+    if not paths:
+        st.info('아직 올린 문서가 없습니다. 위 상자에 파일을 끌어다 놓거나 "Upload" 버튼을 누르세요.')
+        return
+
+    # 사업지구: 등록된 지구 또는 새 지구(사업 목록을 함께 입력)
+    names = CAT['districts']
+    guess = catalog.guess_district(CAT, paths[0].name)
+    if 'up_district_next' in st.session_state:
+        st.session_state['up_district'] = st.session_state.pop('up_district_next')
+    c1, c2 = st.columns([1, 2])
+    district = c1.selectbox('사업지구', names + [NEW_DISTRICT], index=names.index(guess) if guess in names else 0,
+                            key='up_district')
+    if district == NEW_DISTRICT:
+        new_name = c2.text_input('새 사업지구 이름', placeholder='예: 미리내지구', key='up_new_name')
+        texts = []
+        for p in paths:
+            try:
+                texts.append(extract.read_text(p))
+            except Exception:
+                pass
+        sug = catalog.suggest_facilities(texts)
+        default = '\n'.join(f"{s['name']}, {s['type']}" for s in sug)
+        st.markdown('**사업 목록** — 한 줄에 "사업명, 유형"(유형: 도로·철도·환승·대중교통). 문서에서 찾은 후보를 미리 채웠으니 고쳐 쓰세요.')
+        fac_text = st.text_area('사업 목록', default, height=150, key=f'up_facs_{len(paths)}', label_visibility='collapsed')
+        facs = []
+        for line in fac_text.splitlines():
+            parts = [x.strip() for x in line.split(',')]
+            if parts and parts[0]:
+                t = parts[1] if len(parts) > 1 and parts[1] in compare.TYPES else catalog.facility_type(CAT, '', parts[0])
+                facs.append({'name': parts[0], 'type': t})
+        if not new_name or not facs:
+            st.warning('새 사업지구 이름과 사업을 하나 이상 입력하세요.')
+            return
+        if st.button(f'"{new_name}" 등록 (사업 {len(facs)}개)'):
+            catalog.save_local_district(new_name.strip(), facs)
+            CAT = catalog.load(cfg)
+            st.session_state['up_district_next'] = new_name.strip()  # 다음 실행에서 지구 선택칸에 넣는다
+            flash(f'{new_name} 등록 완료. 이제 "값 뽑기"를 누르세요.')
+            st.rerun()
+        return
+    show_flash()
+    facs = sorted({i['facility'] for i in catalog.items_for(CAT, district)})
+    st.caption(f'{district} 사업 {len(facs)}개: ' + ', '.join(facs))
+
+    docs = extract.describe(paths, db.next_doc_num(con), CAT)
+    for d in docs:
+        d['doc_id'] = db.doc_id_for_file(con, d['file']) or d['doc_id']  # 이미 등록된 파일은 같은 문서ID로 교체
+        d['district'] = district
+    st.markdown(f'**올린 문서 {len(docs)}개** — 단계·일자는 파일명으로 추정한 값이며 저장 후에도 고칠 수 있습니다.')
+    doc_table(docs)
+    if st.button('값 뽑기', type='primary'):
+        st.session_state['pending'] = extract_all(docs, catalog.items_for(CAT, district))
+    pending = st.session_state.get('pending')
+    if not pending or {d['file'] for d, _, _ in pending} != {d['file'] for d in docs}:
+        return
+
+    st.markdown('**뽑힌 값 확인** — 틀린 값은 빼고 저장하세요. 빠진 값은 문서 표현이 규칙과 달라 못 찾은 것입니다.')
+    keep_all = []
+    for d, cands, err in pending:
+        with st.expander(f"{d['doc_id']} {d['file']} — {len(cands)}건" + (f' ⚠ {err}' if err else ''), expanded=len(pending) <= 3):
+            if not cands:
+                st.caption('찾은 값이 없습니다.')
+                continue
+            labels = [f"{c['facility']} · {c['item']} = {c['value']}{c['unit']}" for c in cands]
+            st.dataframe(pd.DataFrame([{'사업': c['facility'], '항목': c['item'], '값': f"{c['value']}{c['unit']}",
+                                        '위치': c['location']} for c in cands]), hide_index=True, width='stretch')
+            drop = st.multiselect('뺄 값', labels, key=f"drop_{d['file']}", placeholder='뺄 값이 있으면 고르세요')
+            keep_all.append((d, [c for c, lab in zip(cands, labels) if lab not in drop]))
+    n = sum(len(cs) for _, cs in keep_all)
+    if st.button(f'DB에 저장하고 판정 ({n}건)', type='primary', disabled=not n):
+        for d, cs in keep_all:
+            db.save_document(con, d, cs)
+        db.recompute(con, CAT['default'])
+        st.session_state.pop('pending', None)
+        st.session_state['district'] = district
+        flash(f'{district} 문서 {len(keep_all)}개에서 {n}건을 저장하고 판정했습니다.')
+        st.session_state['goto'] = DASH
+        st.rerun()
+
+
+def extract_all(docs, items):
+    """문서마다 [AI 또는 규칙] 추출. 반환: [(문서, 후보 목록, 오류 문구)]"""
+    out = []
+    bar = st.progress(0.0, text='값 뽑는 중...')
     for i, d in enumerate(docs, 1):
-        bar.progress((i - 1) / len(docs), text=f'{d["file"]} 추출 중 ({i}/{len(docs)})')
+        bar.progress((i - 1) / len(docs), text=f'{d["file"]} ({i}/{len(docs)})')
         try:
-            cands, meta = extract.extract_candidates(d, catalog.items_for(CAT, d['district']), cfg)
-            db.save_document(con, d, cands)
-            n += len(cands)
-            if meta.get('stage') and meta['stage'] != d['stage']:
-                notes.append(f"{d['doc_id']} {d['file']}: AI는 단계를 '{meta['stage']}'로 봄 (파일명 추정 '{d['stage']}' 사용)")
+            if HAS_LLM:
+                cands, _ = extract.extract_candidates(d, items, cfg)
+            else:
+                cands = extract.rule_extract(d, items)
+            out.append((d, cands, ''))
         except Exception as e:
-            errors.append(f"{d['file']}: {e}")
-    bar.progress(1.0, text='완료')
-    db.recompute(con, CAT['default'])
-    msg = f'문서 {len(docs) - len(errors)}개에서 후보 {n}건을 추출해 최신값을 판정했습니다.'
-    msg += ''.join(f'\n\n⚠ {m}' for m in errors + notes)
-    flash(msg)
+            out.append((d, [], f'읽기 실패: {e}'))
+    bar.empty()
+    return out
 
 
-# ---------------- 📊 대시보드 ----------------
+# ---------------- 📊 대시보드 (간결판) ----------------
+TYPE_ICON = {'도로': '🛣', '철도': '🚆', '환승': '🔁', '대중교통': '🚌'}
+# 추진상태 → (구분, 색). 색만으로 구분하지 않게 늘 글자와 함께 쓴다
+STATE_STYLE = {'확인': ('확인 필요', '#d03b3b'), '협의': ('협의 중', '#c98500'), '진행': ('진행', '#2a78d6'),
+               '없음': ('상태 미상', '#898781')}
+
+
+def state_key(p):
+    s = p['추진상태']
+    if p['확인 필요'] or any(k in s for k in ('지연', '반대', '재조사')):
+        return '확인'
+    if any(k in s for k in ('협의', '조건부', '검토', '이견')):
+        return '협의'
+    return '진행' if s else '없음'
+
+
+def short(d):
+    m = re.fullmatch(r'20(\d\d)-(\d\d)-(\d\d)', d or '')
+    return f'{int(m.group(2))}.{int(m.group(3))}.' if m else (d or '')
+
+
+def district_switch():
+    """지구 전환: 버튼 줄(지구가 하나면 숨김). 다른 화면과 같은 지구를 쓴다."""
+    opts = district_options()
+    if st.session_state.get('district') not in opts:
+        st.session_state['district'] = CAT['default'] if CAT['default'] in opts else opts[0]
+    if len(opts) == 1:
+        return opts[0]
+    pick = st.segmented_control('사업지구', opts, default=st.session_state['district'], key='dash_district',
+                                label_visibility='collapsed')
+    if pick and pick != st.session_state['district']:
+        st.session_state['district'] = pick
+    return st.session_state['district']
+
+
 def page_dashboard():
     if not db.facts(con):
         st.header('📊 대시보드')
-        st.info('아직 판정한 문서가 없습니다. 📂 문서 화면에서 "추출 시작"을 누르세요.')
+        st.info('아직 판정한 문서가 없습니다. 💾 DB 화면에서 샘플을 불러오거나 문서를 올리세요.')
         return
-    district = district_picker()
+    district = district_switch()
     facts = ordered(db.facts(con, district=district))
     sources = db.sources(con, district)
     cands = db.load_candidates(con, district)
-    if not facts:
-        st.info(f'{district} 문서가 없습니다.')
-        return
+    projects = compare.projects(facts, CAT)
+    order = list(dict.fromkeys(f['facility'] for f in facts))
+    # 급한 것부터: 확인 필요 → 협의 중 → 진행 → 상태 미상, 같은 상태면 사업 목록 순서
+    projects.sort(key=lambda p: (list(STATE_STYLE).index(state_key(p)),
+                                 order.index(p['사업명']) if p['사업명'] in order else 99))
+    dates = sorted(s['date'] for s in sources if s['date'])
+    conf = [f for f in facts if f['status'] == '미확정(충돌)']
+    count = {k: sum(state_key(p) == k for p in projects) for k in STATE_STYLE}
+    cost = sum(p['사업비(억원)'] or 0 for p in projects)
+
+    st.markdown(f'<div class="v2-title">{esc(district)}</div>'
+                f'<div class="v2-sub">문서 {len(sources)}건 · 최근 문서 {short(dates[-1]) if dates else "—"}</div>',
+                unsafe_allow_html=True)
+    # 한눈 요약: 숫자 4개
+    tiles = [(f'{len(projects)}개', '사업'), (draft.fmt_value(compare._fmt(cost), '억원') if cost else '—', '사업비 합계'),
+             (f"{count['협의']}개", '협의 중'), (f"{count['확인']}개", '확인 필요')]
+    st.markdown('<div class="v3-tiles">' + ''.join(
+        f'<div class="v3-tile{" warn" if l == "확인 필요" and count["확인"] else ""}"'
+        + (' title="지원액 포함"' if l == '사업비 합계' else '') + f'><div class="v">{esc(v)}</div>'
+        f'<div class="l">{esc(l)}</div></div>' for v, l in tiles) + '</div>', unsafe_allow_html=True)
+    show_flash()
+
+    # 1) 지금 확인할 것: 값 충돌을 버튼 한 번으로 확정
+    for f in conf:
+        tops = json.loads(f['conflict_candidates'] or '[]')
+        with st.container(border=True):
+            st.markdown(f"**⚠ {esc(f['facility'])} · {esc(f['item'])}** — 같은 단계·같은 날짜 문서끼리 값이 달라요. 맞는 값을 고르세요.")
+            cols = st.columns(len(tops) or 1)
+            for i, c in enumerate(tops):
+                label = f"{draft.fmt_value(c['value'], c['unit'])}  ({c['doc_id']} · {short(c['date'])})"
+                if cols[i].button(label, key=f"v3ch{f['id']}_{i}", width='stretch',
+                                  help=f"{c['file']} · {c['stage']} · {c['location']}"):
+                    db.save_choice(con, f['district'], f['facility'], f['item'], c['value'], '담당자')
+                    flash(f"{f['facility']} {f['item']} → {draft.fmt_value(c['value'], c['unit'])} 확정 (선택 기록 저장)")
+                    st.rerun()
+
+    # 2) 사업 목록: 한 사업 한 줄 (상태 · 사업비 · 규모 · 완료 · 현안)
     by_key = {}
     for c in cands:
         by_key.setdefault((c['facility'], c['item']), []).append(c)
-    dates = sorted(s['date'] for s in sources if s['date'])
-    st.header(f'📊 {district} 광역교통 최신값 대시보드')
-    st.caption(f"문서 {len(sources)}건 기준 ({dates[0]} ~ {dates[-1]}) · 값은 규칙(문서 단계 > 최근 일자 > 버전)으로 판정, "
-               'AI는 값을 정하지 않음')
-    show_flash()
+    st.markdown('<div class="v3-list">' + '<div class="v3-row v3-head"><span>사업</span><span>상태</span>'
+                '<span class="r">사업비</span><span class="r">규모</span><span class="r">완료</span></div>'
+                + ''.join(project_row(p) for p in projects) + '</div>', unsafe_allow_html=True)
 
-    conf = [f for f in facts if f['status'] == '미확정(충돌)']
-    informal = {(f['facility'], f['item']): [c for c in by_key.get((f['facility'], f['item']), [])
-                                             if c['stage'] in INFORMAL and
-                                             (f['value'] is None or norm(c['value']) != norm(f['value']))]
-                for f in facts}
-    n_ref = sum(len(v) for v in informal.values())
-    c = st.columns(5)
-    kpi(c[0], len(sources), '문서')
-    kpi(c[1], len(facts), '항목')
-    kpi(c[2], sum(f['status'] == '확정' for f in facts), '✔ 확정')
-    kpi(c[3], len(conf), '⚠ 확인 필요', warn=bool(conf))
-    kpi(c[4], n_ref, 'ⓘ 비공식 참고')
+    # 3) 자세히: 고른 사업 하나만
+    names = [p['사업명'] for p in projects]
+    pick = st.selectbox('자세히 볼 사업', ['—'] + names, key=f'v3pick_{district}',
+                        format_func=lambda n: '사업을 고르면 현안·향후 계획·근거 문서를 보여 줍니다' if n == '—' else n)
+    if pick != '—':
+        p = projects[names.index(pick)]
+        project_card(p, [f for f in facts if f['facility'] == pick], by_key)
 
-    # 확인 필요: 대시보드에서 바로 선택
-    for f in conf:
-        conflict_card(f)
-    if not conf:
-        st.success('✔ 모든 항목이 확정되었습니다. 문서 간 값이 충돌하는 항목이 없습니다.')
-
-    st.subheader('사업별 최신값')
-    by_fac = {}
-    for f in facts:
-        by_fac.setdefault(f['facility'], []).append(f)
-    cols = st.columns(2)
-    for i, (fac, fs) in enumerate(by_fac.items()):
-        cols[i % 2].markdown(facility_card(fac, fs, by_key, informal), unsafe_allow_html=True)
-
-    st.subheader('문서 흐름')
-    st.caption('문서 단계(위로 갈수록 우선)와 일자. 같은 단계면 오른쪽(최근) 문서가 이깁니다. 비공식은 판정에 쓰지 않습니다.')
-    st.altair_chart(timeline_chart(sources), width='stretch')
-
-    st.subheader('항목 이력 보기')
-    labels = {f"{f['facility']} / {f['item']}": f for f in facts}
-    pick = st.selectbox('항목', list(labels), label_visibility='collapsed')
-    item_history(labels[pick], by_key.get((labels[pick]['facility'], labels[pick]['item']), []))
-
-    with st.expander('전체 표로 보기'):
-        df = pd.DataFrame([query.to_row(f) for f in facts])
-        st.dataframe(df, hide_index=True, width='stretch')
-        st.download_button('CSV 내려받기', df.to_csv(index=False).encode('utf-8-sig'), '최신값표.csv', 'text/csv')
-
-    ch = db.choices(con, district)
-    if ch:
-        with st.expander(f'담당자 선택 기록 ({len(ch)}건)'):
-            st.dataframe(pd.DataFrame([{
-                '시설': c['facility'], '항목': c['item'], '선택값': c['value'], '선택자': c['chooser'],
-                '선택일': c['chosen_at'], '상태': '적용 중' if c['active'] else '이력 보관(상위 문서 반영)',
-                '후보': ' / '.join(f"{x['value']}{x['unit']}({x['doc_id']})" for x in json.loads(c['candidates'] or '[]'))}
-                for c in ch]), hide_index=True, width='stretch')
+    with st.expander(f'문서 {len(sources)}건 흐름 보기'):
+        st.caption('위로 갈수록 우선하는 단계. 같은 단계면 오른쪽(최근) 문서가 이깁니다. 비공식은 판정에 쓰지 않습니다.')
+        st.altair_chart(timeline_chart(sources), width='stretch')
 
 
-def conflict_card(f):
-    tops = json.loads(f['conflict_candidates'] or '[]')
-    with st.container(border=True):
-        st.markdown(f"#### ⚠ 확인 필요 · {f['facility']} / {f['item']}")
-        same = tops[0] if tops else {}
-        st.caption(f"같은 단계({same.get('stage', '')})·같은 일자({same.get('date', '')}) 문서끼리 값이 달라 규칙으로 정할 수 없습니다. "
-                   '원문을 대조해 맞는 값을 고르세요.'
-                   + (f" 지금은 이전 확정값 {f['value']}{f['unit']}을 유지하고 있습니다." if f['value'] is not None else ''))
-        who = st.text_input('선택자', '담당자', key=f"who{f['id']}")
-        cols = st.columns(max(len(tops), 1))
-        for i, c in enumerate(tops):
-            with cols[i]:
-                st.markdown(f'<div class="dd-cand"><div class="v">{esc(draft.fmt_value(c["value"], c["unit"]))}</div>'
-                            f'<div class="f">{esc(c["file"])}</div>'
-                            f'<div class="m">{esc(c["doc_id"])} · {esc(c["stage"])} · {esc(c["date"])} · {esc(c["location"])}</div>'
-                            '</div>', unsafe_allow_html=True)
-                if st.button(f"{draft.fmt_value(c['value'], c['unit'])}(으)로 확정", key=f"ch{f['id']}_{i}", type='primary',
-                             width='stretch'):
-                    db.save_choice(con, f['district'], f['facility'], f['item'], c['value'], who or '담당자')
-                    flash(f"{f['facility']} / {f['item']}: {draft.fmt_value(c['value'], c['unit'])} 확정. 선택 기록을 저장했습니다.")
-                    st.rerun()
+def project_row(p):
+    word, color = STATE_STYLE[state_key(p)]
+    cost = draft.fmt_value(compare._fmt(p['사업비(억원)']), '억원') if p['사업비(억원)'] is not None else '—'
+    spec = ' · '.join(x for x in (f"{compare._fmt(p['연장(km)'])}km" if p['연장(km)'] is not None else '',
+                                  f"{p['차로']}차로" if p['차로'] else '',
+                                  draft.fmt_value(compare._fmt(p['규모(㎡)']), '㎡') if p['규모(㎡)'] is not None else '') if x) or '—'
+    when = '확인 필요' if '개통목표' in p['확인 필요'] or '완료시기' in p['확인 필요'] else (p['시기'] or '—')
+    issue = p['현안'] or p['추진상태'] or ''
+    return (f'<div class="v3-row" style="border-left-color:{color}">'
+            f'<span class="v3-name">{TYPE_ICON.get(p["유형"], "•")} {esc(p["사업명"])}</span>'
+            f'<span><span class="v2-pill" style="color:{color};border-color:{color}">{esc(word)}</span></span>'
+            f'<span class="r b" data-l="사업비">{esc(cost)}</span><span class="r" data-l="규모">{esc(spec)}</span>'
+            f'<span class="r" data-l="완료">{esc(when)}</span>'
+            + (f'<span class="v3-issue" title="{esc(issue)}">⚑ {esc(issue)}</span>' if issue else '') + '</div>')
 
 
-def facility_card(fac, fs, by_key, informal):
-    rows, head, texts = [], '', []
-    for f in fs:
-        kind = KINDS.get(f['item'])
-        meta = f"{f['source_doc']} · {f['doc_stage']} · {f['doc_date']}" if f['source_doc'] else ''
-        memos = ''.join(f'<div class="dd-memo">ⓘ 비공식 메모: {esc(c["value"])} ({esc(c["doc_id"])}) — 반영 안 함</div>'
-                        for c in informal.get((f['facility'], f['item']), []))
-        if kind == 'status':  # 추진상태는 사업명 아래 한 줄로
-            v = '확인 필요' if f['status'] == '미확정(충돌)' else (f['value'] or '—')
-            head = (f'<div class="dd-status"><span class="dd-dot"></span>{esc(v)}'
-                    f'<span class="dd-meta"> &nbsp;{esc(meta)}</span></div>{memos}')
-            continue
-        if kind in ('issue', 'plan'):  # 현안·향후계획은 문장으로
-            v = '문서 간 내용이 달라 확인 필요' if f['status'] == '미확정(충돌)' else (f['value'] or '—')
-            texts.append(f'<div class="dd-text"><div class="dd-tl">{"⚑ 현안" if kind == "issue" else "→ 향후계획"}</div>'
-                         f'<div>{esc(v)}</div><div class="dd-meta" style="text-align:left">{esc(meta)}</div></div>{memos}')
-            continue
-        if f['status'] == '미확정(충돌)':
-            val = '확인 필요'
-            chip = '<span class="dd-chip warn"><span class="dd-ico-warn">⚠</span> 확인 필요</span>'
-        elif f['status'] == '참고':
-            val = '—'
-            chip = '<span class="dd-chip ref">ⓘ 공식 문서 없음</span>'
-        else:
-            val = draft.fmt_value(f['value'], f['unit'])
-            chip = f'<span class="dd-chip"><span class="dd-ico-ok">✔</span> {METHOD_LABEL.get(f["method"], f["method"])}</span>'
-        off = sorted((c for c in by_key.get((f['facility'], f['item']), []) if c['stage'] not in INFORMAL),
-                     key=lambda c: (c['date'], c['doc_id']))
-        change = ''
-        if off and f['value'] is not None and norm(off[0]['value']) != norm(f['value']):
-            change = f"처음 {draft.fmt_value(off[0]['value'], f['unit'])} ({off[0]['doc_id']}) → 변경"
-        rows.append(f'<div class="dd-row"><div><div class="dd-item">{esc(f["item"])}</div>'
-                    f'<div class="dd-change">{esc(change)}</div></div>'
-                    f'<div><div class="dd-val">{esc(val)}{chip}</div><div class="dd-meta">{esc(meta)}</div></div></div>')
-        for c in informal.get((f['facility'], f['item']), []):
-            rows.append(f'<div class="dd-memo">ⓘ 비공식 메모 {esc(draft.fmt_value(c["value"], f["unit"] or c["unit"]))} '
-                        f'({esc(c["doc_id"])} {esc(c["file"])}) — 반영 안 함</div>')
-    return f'<div class="dd-card"><h4>{esc(fac)}</h4>{head}{"".join(rows)}{"".join(texts)}</div>'
+def project_card(p, fs, by_key):
+    k = state_key(p)
+    word, color = STATE_STYLE[k]
+    nums = []
+    if p['사업비(억원)'] is not None:
+        nums.append((draft.fmt_value(compare._fmt(p['사업비(억원)']), '억원'), p['비용 구분'] or '사업비'))
+    spec = ' · '.join(x for x in (f"{compare._fmt(p['연장(km)'])}km" if p['연장(km)'] is not None else '',
+                                  f"{p['차로']}차로" if p['차로'] else '',
+                                  draft.fmt_value(compare._fmt(p['규모(㎡)']), '㎡') if p['규모(㎡)'] is not None else '') if x)
+    if spec:
+        nums.append((spec, '규모'))
+    if p['시기']:
+        nums.append(('확인 필요' if '개통목표' in p['확인 필요'] or '완료시기' in p['확인 필요'] else p['시기'],
+                     '개통' if p['시기 구분'] == '개통목표' else '완료'))
+    memo = sum(1 for f in fs for c in by_key.get((f['facility'], f['item']), [])
+               if c['stage'] in INFORMAL and (f['value'] is None or norm(c['value']) != norm(f['value'])))
+    num_html = ''.join(f'<div class="v2-n"><div class="v">{esc(v)}</div><div class="l">{esc(l)}</div></div>' for v, l in nums)
+    issue = f'<div class="v2-issue">⚑ {esc(p["현안"])}</div>' if p['현안'] else ''
+    plan = f'<div class="v2-plan">→ {esc(p["향후계획"])}</div>' if p['향후계획'] else ''
+    tags = (f'<span class="v2-tag">{esc(p["시행주체"])} 시행</span>' if p['시행주체'] else '') + \
+           (f'<span class="v2-tag">ⓘ 비공식 메모 {memo}</span>' if memo else '')
+    st.markdown(
+        f'<div class="v2-card" style="border-left-color:{color}">'
+        f'<div class="v2-h"><span class="v2-name">{TYPE_ICON.get(p["유형"], "•")} {esc(p["사업명"])}</span>'
+        f'<span class="v2-pill" style="color:{color};border-color:{color}">{esc(word)}</span></div>'
+        f'<div class="v2-status">{esc(p["추진상태"] or "추진상태 정보 없음")}</div>'
+        f'<div class="v2-nums">{num_html}</div>{issue}{plan}<div>{tags}</div></div>', unsafe_allow_html=True)
+    with st.container():
+        st.caption('항목별 최신값과 근거 문서')
+        rows = []
+        for f in fs:
+            off = sorted((c for c in by_key.get((f['facility'], f['item']), []) if c['stage'] not in INFORMAL),
+                         key=lambda c: (c['date'], c['doc_id']))
+            first = off[0]['value'] if off else None
+            rows.append({'항목': f['item'],
+                         '최신값': '확인 필요' if f['status'] == '미확정(충돌)' else draft.fmt_value(f['value'], f['unit']),
+                         '처음 값': draft.fmt_value(first, f['unit']) if first is not None and f['value'] is not None
+                         and norm(first) != norm(f['value']) else '',
+                         '판정': METHOD_LABEL.get(f['method'], f['method']),
+                         '근거': f"{f['source_doc']} {short(f['doc_date'])} {f['doc_stage']}" if f['source_doc'] else ''})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
+        for f in fs:
+            for c in by_key.get((f['facility'], f['item']), []):
+                if c['stage'] in INFORMAL and (f['value'] is None or norm(c['value']) != norm(f['value'])):
+                    st.caption(f"ⓘ 비공식 메모({c['doc_id']}) · {f['item']}: {c['value']}{c['unit']} — 반영 안 함")
 
 
 def stage_scale():
@@ -408,79 +557,30 @@ def timeline_chart(sources):
         tooltip=['문서', '파일', '단계', alt.Tooltip('일자:T', format='%Y-%m-%d'), '후보 수'])
     pts = base.mark_circle(size=170, opacity=1, stroke='white', strokeWidth=2).encode(
         color=alt.Color('단계:N', scale=stage_scale(), legend=None))
-    # 같은 날짜·같은 단계 문서는 이름표를 하나로 묶어 겹치지 않게 한다
     lab = df.dropna(subset=['일자']).groupby(['일자', '단계'], as_index=False)['문서'].agg('·'.join)
     lbl = alt.Chart(lab).mark_text(dy=-14, fontSize=11).encode(
         x='일자:T', y=alt.Y('단계:N', sort=STAGE_ORDER, scale=alt.Scale(domain=STAGE_ORDER)), text='문서')
     return (pts + lbl).properties(height=230)
 
 
-def to_number(v):
-    s = str(v).replace(',', '').strip()
-    m = re.fullmatch(r'(\d{4})\.(\d{1,2})', s)
-    if m and 1 <= int(m.group(2)) <= 12:  # 2031.6 → 2031년 6월
-        return int(m.group(1)) + (int(m.group(2)) - 1) / 12
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def item_history(f, cs):
-    is_time = f['unit'] == '' and any(re.fullmatch(r'\d{4}\.\d{1,2}', str(c['value'])) for c in cs)
-    rows = [{'문서': c['doc_id'], '파일': c['file'], '단계': c['stage'], '일자': c['date'],
-             '값': draft.fmt_value(c['value'], c['unit']), 'y': to_number(c['value']),
-             '최신값 근거': '예' if c['doc_id'] == f['source_doc'] else ''} for c in cs]
-    df = pd.DataFrame(rows)
-    left, right = st.columns([3, 2])
-    plot = df.dropna(subset=['y'])
-    with left:
-        if not plot.empty:
-            plot = plot.assign(일자=pd.to_datetime(plot['일자']))
-            ytitle = '시기(연)' if is_time else (f['unit'] or '값')
-            base = alt.Chart(plot).encode(
-                x=alt.X('일자:T', title=None, axis=alt.Axis(format='%m/%d', grid=False)),
-                y=alt.Y('y:Q', title=ytitle, scale=alt.Scale(zero=False), axis=alt.Axis(format='.1f' if is_time else ',')),
-                tooltip=['문서', '파일', '단계', '값', alt.Tooltip('일자:T', format='%Y-%m-%d')])
-            pts = base.mark_point(size=110, filled=True, opacity=1).encode(
-                color=alt.Color('단계:N', scale=stage_scale(), legend=alt.Legend(title='문서 단계', orient='bottom')),
-                shape=alt.condition(alt.datum['단계'] == '비공식', alt.value('triangle'), alt.value('circle')))
-            layers = [pts]
-            cur = to_number(f['value']) if f['value'] is not None else None
-            if cur is not None:
-                layers.append(alt.Chart(pd.DataFrame({'y': [cur]})).mark_rule(strokeDash=[4, 3], color='#52514e')
-                              .encode(y='y:Q'))
-            st.altair_chart(alt.layer(*layers).properties(height=240), width='stretch')
-            st.caption('점선 = 현재 최신값. ▲ = 비공식(반영 안 함).')
-        st.dataframe(df.drop(columns=['y']), hide_index=True, width='stretch')
-    with right:
-        status = {'미확정(충돌)': '⚠ 확인 필요', '확정': '✔ 확정', '참고': 'ⓘ 참고'}.get(f['status'], f['status'])
-        st.metric(f"{f['facility']} / {f['item']}", draft.fmt_value(f['value'], f['unit']) if f['value'] is not None else '미확정',
-                  help=f['note'] or None)
-        st.markdown(f"**{status}** · {METHOD_LABEL.get(f['method'], f['method'])}")
-        if f['source_doc']:
-            st.caption(f"근거: {f['source_doc']} {f['source_file']} ({f['source_loc']})")
-        hs = db.history(con, f['id'])
-        if hs:
-            st.markdown('**변경 이력**')
-            for h in hs:
-                prev = h['prev_value'] or '(처음)'
-                st.markdown(f"- {prev} → **{h['new_value'] or '—'}**  \n  <small>{esc(h['kind'])} · {esc(h['reason'])}</small>",
-                            unsafe_allow_html=True)
-
-
 # ---------------- 📝 보고서·자료 ----------------
 def page_report():
-    st.header('📝 보고서·자료')
+    st.header('📝 보고서 작성')
     if not db.facts(con):
-        st.info('먼저 📂 문서 화면에서 "추출 시작"을 누르세요.')
+        st.info('먼저 💾 DB 화면에서 샘플을 불러오거나 문서를 올리세요.')
         return
     district = district_picker()
     facts = ordered(db.facts(con, district=district))
-    st.caption('양식을 고르면 목차가 미리 체크됩니다. 목차를 켜고 끄면 체크한 목차만으로 초안을 만듭니다. '
-               '숫자는 모두 DB 최신값입니다.')
+    c0, c00 = st.columns([2, 3], vertical_alignment='bottom')
+    form = c0.selectbox('회사 양식 (모양)', list(lh_style.FORMS), key='rp_form',
+                        help='회사 권장양식(보고서 작성 가이드라인)에 맞춘 글꼴·제목 띠·기호 단계·간격으로 만듭니다.')
+    c00.caption(lh_style.FORM_HELP[lh_style.FORMS[form][0]])
+    press = lh_style.FORMS[form][0] == 'press'
+    st.caption('보고 유형을 고르면 목차가 미리 체크됩니다. 체크한 목차만으로 초안을 만들고, 숫자는 모두 DB 최신값입니다.'
+               if not press else '보도자료는 기사제목·소제목·리드문·본문을 사업 DB 값으로 자동 작성합니다(목차 선택 없음).')
 
-    preset = st.radio('양식', list(draft.PRESETS), horizontal=True, key='rp_preset')
+    preset = st.radio('보고 유형 (내용)', list(draft.PRESETS), horizontal=True, key='rp_preset',
+                      disabled=press)
     tail, defaults = draft.PRESETS[preset]
     c1, c2 = st.columns([3, 2])
     title = c1.text_input('보고서 제목', f'{district} {tail}', key=f'rp_title_{preset}_{district}')
@@ -508,9 +608,11 @@ def page_report():
             extra[sec] = st.text_area(f'{sec} 직접 입력 (선택)', key=f'rp_extra_{sec}', height=90,
                                       placeholder=f'한 줄에 하나. "(핵심어) 내용", "- 세부", "⇒ 조치"\n예)\n{hints[sec]}',
                                       help='자동으로 만든 문장 뒤에 덧붙습니다. 문서에 없는 계획·현안을 담당자가 적는 칸입니다.')
-    if not chosen:
+    if not chosen and not press:
         st.warning('목차를 하나 이상 체크하세요.')
-    if st.button('보고서 초안 만들기', type='primary', disabled=not chosen or not pick_facs):
+    if st.button('보도자료 초안 만들기' if press else '보고서 초안 만들기', type='primary',
+                 disabled=(not chosen and not press) or not pick_facs):
+        chosen = chosen or list(draft.SECTIONS[:-1])
         sel = [f for f in facts if f['facility'] in pick_facs]
         blocks = draft.build(sel, db.load_candidates(con, district), db.sources(con, district), db.choices(con, district),
                              title, district, dept, chosen, extra, HAS_LLM, cfg, order=catalog.order(CAT, district),
@@ -521,16 +623,31 @@ def page_report():
     if not rep or rep.get('district') != district:
         return
     blocks = rep['blocks']
-    title = next(b[1] for b in blocks if b[0] == 'title')
+    kind = lh_style.FORMS[form][0]
+    if kind == 'press':  # 보도자료: 사업 DB 값으로 따로 구성
+        meta = next((b[1] for b in blocks if b[0] == 'meta'), {})
+        styled = lh_style.press_release(blocks, rep['facts'], district, meta.get('dept') or dept, KINDS)
+        title = next(b[1] for b in styled if b[0] == 'ptitle')
+        hwpx_blocks = lh_style.to_basic(styled)
+    elif kind != 'basic':
+        styled = lh_style.restyle(blocks, form)
+        title = next(b[1] for b in blocks if b[0] == 'title')
+        hwpx_blocks = blocks
+    else:
+        styled, title, hwpx_blocks = None, next(b[1] for b in blocks if b[0] == 'title'), blocks
     safe = re.sub(r'[\\/:*?"<>|]', '_', title)
     st.divider()
-    st.caption(f"목차: {' · '.join(rep['sections'])} · 대상 {len({f['facility'] for f in rep['facts']})}개 사업, "
-               f"{len(rep['facts'])}개 항목")
+    st.caption(f"양식: {form} · 목차: {' · '.join(rep['sections']) if kind != 'press' else '보도자료 구성'} · "
+               f"대상 {len({f['facility'] for f in rep['facts']})}개 사업")
     if any(f['status'] == '미확정(충돌)' for f in rep['facts']):
         st.warning('확인 필요 항목이 있습니다. 대시보드에서 확정한 뒤 다시 만들면 보고서에 반영됩니다.')
     d1, d2, d3 = st.columns(3)
-    files = [('한글(hwpx) 내려받기', f"{safe}_{rep['stamp']}.hwpx", lambda: draft.to_hwpx(blocks), 'application/octet-stream', d1),
-             ('워드(docx) 내려받기', f"{safe}_{rep['stamp']}.docx", lambda: draft.to_docx(blocks),
+    use_form = styled is not None and hwpx_forms.available(form)
+    files = [('한글(hwpx) 내려받기', f"{safe}_{rep['stamp']}.hwpx",
+              (lambda: hwpx_forms.render(styled, form)) if use_form else (lambda: draft.to_hwpx(hwpx_blocks)),
+              'application/octet-stream', d1),
+             ('워드(docx) 내려받기', f"{safe}_{rep['stamp']}.docx",
+              lambda: lh_style.to_docx(styled, form) if styled else draft.to_docx(blocks),
               'application/vnd.openxmlformats-officedocument.wordprocessingml.document', d2),
              ('자료표 엑셀 내려받기', f"자료표_{rep['stamp']}.xlsx",
               lambda: query.to_excel([query.to_row(f) for f in rep['facts']], title, '대상 사업 선택', db.sources(con, district)),
@@ -539,7 +656,12 @@ def page_report():
         data = make()
         if col.download_button(label, data, file_name=name, mime=mime, width='stretch'):
             (db.OUTPUT / name).write_bytes(data)
-    st.markdown(draft.to_html(blocks), unsafe_allow_html=True)
+    if styled:
+        st.caption('한글(hwpx)은 회사 양식 서식 파일에 그대로 채워 만들고, 워드는 같은 규칙(글꼴·제목 띠·기호 단계·간격)으로 만듭니다.'
+                   if use_form else '워드 파일에 회사 양식을 적용합니다. 이 양식의 한글 서식 파일(templates/company/)이 없어 한글본은 기본 서식입니다.')
+        st.markdown(lh_style.to_html(styled, form), unsafe_allow_html=True)
+    else:
+        st.markdown(draft.to_html(blocks), unsafe_allow_html=True)
     with st.expander('자료표(표로 보기)'):
         st.dataframe(pd.DataFrame([query.to_row(f) for f in rep['facts']]), hide_index=True, width='stretch')
 
@@ -563,10 +685,9 @@ def project_table(rows):
 
 
 def page_compare():
-    st.header('🔎 사업지구 통합 비교')
     facts = db.facts(con)
     if not facts:
-        st.info('먼저 📂 문서 화면에서 "추출 시작"을 누르세요. (샘플 모드에서 "다른 지구 문서 포함"을 켜면 3개 지구를 비교합니다)')
+        st.info('먼저 💾 DB 화면에서 샘플을 불러오거나 문서를 올리세요. (샘플의 "다른 지구 문서"를 켜면 3개 지구를 비교합니다)')
         return
     rows = compare.projects(facts, CAT)
     st.caption('여러 사업지구의 광역교통 사업을 같은 기준으로 모아 봅니다. 값은 지구별로 판정한 DB 최신값입니다. '
@@ -625,7 +746,7 @@ def page_compare():
                             + (f"  \n  → {r['향후계획']}" if r['향후계획'] else ''))
 
 
-# ---------------- 💬 질문하기 ----------------
+# ---------------- 💬 챗봇 ----------------
 EXAMPLES = ['지자체에서 1천억 미만의 유사 도로사업들을 검토해보라고 하는데 다른 사업지구에 이런 사례가 있을까?',
             '개별 광역시설 사업 중에 시행주체(공사주체)가 지자체인 사업의 사례가 있을까?',
             '주민 반대로 협의가 지연되고 있는 사업이 있어?',
@@ -643,9 +764,9 @@ def show_answer(m):
 
 
 def page_chat():
-    st.header('💬 질문하기')
+    st.header('💬 챗봇')
     if not db.facts(con):
-        st.info('먼저 📂 문서 화면에서 "추출 시작"을 누르세요.')
+        st.info('먼저 💾 DB 화면에서 샘플을 불러오거나 문서를 올리세요.')
         return
     st.caption('질문을 검색 조건(지구·유형·사업비·시행주체·현안 낱말)으로 바꿔 DB에서 바로 찾습니다. 답의 숫자는 모두 DB 값입니다. '
                + ('AI가 질문을 해석하고 답을 씁니다.' if HAS_LLM else 'API 키가 없어 규칙으로 질문을 해석합니다.'))
@@ -678,19 +799,92 @@ def page_chat():
         st.rerun()
 
 
-# ---------------- 화면 전환 ----------------
-with st.sidebar:
-    st.title('디딤돌')
-    st.caption(f"사업지구 {len(CAT['districts'])}곳 문서 → 항목별 최신값 DB")
+# ---------------- 🏠 처음 ----------------
+def page_home():
+    """첫 화면: 검색창(질문하기로 넘김) + 할 일 고르기 + DB에 있는 사업지구."""
+    facts = db.facts(con)
+    st.markdown('<div class="hm-logo">디딤돌</div><div class="hm-sub">사업지구 문서의 최신값을 근거와 함께 찾아 드립니다</div>',
+                unsafe_allow_html=True)
+    _, mid, _ = st.columns([1, 4, 1])
+    with mid:
+        with st.form('home_search', border=False, enter_to_submit=True):
+            c1, c2 = st.columns([5, 1], vertical_alignment='center')
+            q = c1.text_input('질문', key='home_q', label_visibility='collapsed', disabled=not facts,
+                              placeholder='무엇이든 물어보세요  예: 주민 반대로 지연되는 사업이 있어?' if facts
+                              else '먼저 문서를 올리면 질문할 수 있어요')
+            go = c2.form_submit_button('검색', width='stretch', disabled=not facts)
+        if go and q.strip():
+            st.session_state['ask'] = q.strip()
+            st.session_state['goto'] = CHAT
+            st.rerun()
+
+        st.markdown('<div class="hm-sec">무엇을 할까요?</div>', unsafe_allow_html=True)
+        a, b = st.columns(2)
+        for col, (ico, title, desc, target, ok) in zip((a, b), (
+                ('📂', '문서 올리기', '새 문서를 올려 값을 뽑고 DB에 더합니다', DOCS, True),
+                ('📊', '대시보드 보기', '지구별 요약·확인 필요·사업 목록을 봅니다' if facts else '문서를 먼저 올려야 볼 수 있어요', DASH, bool(facts)))):
+            with col.container(border=True):
+                st.markdown(f'<div class="hm-card"><div class="i">{ico}</div><div class="t">{title}</div>'
+                            f'<div class="d">{desc}</div></div>', unsafe_allow_html=True)
+                if st.button(f'{title} →', key=f'hm_{title}', width='stretch', type='primary' if ok and target == DASH else 'secondary',
+                             disabled=not ok):
+                    st.session_state['goto'] = target
+                    if target == DOCS:
+                        st.session_state['db_view'] = DB_VIEWS[0]
+                    st.rerun()
+
+        st.markdown('<div class="hm-sec">현재 DB에 있는 사업지구</div>', unsafe_allow_html=True)
+        if not facts:
+            st.caption('아직 없습니다. 📂 문서 올리기에서 샘플을 불러오거나 문서를 올리세요.')
+            return home_footer()
+        names = district_options()
+        cols = st.columns(min(len(names), 3))
+        for i, d in enumerate(names):
+            fs = [f for f in facts if f['district'] == d]
+            n_proj = len({f['facility'] for f in fs})
+            n_conf = sum(f['status'] == '미확정(충돌)' for f in fs)
+            label = f"{'⚠ ' if n_conf else ''}{d} · 사업 {n_proj}"
+            tip = f'{d} 대시보드로 이동' + (f' (값 충돌 {n_conf}건 확인 필요)' if n_conf else '')
+            if cols[i % len(cols)].button(label, key=f'hm_d_{d}', width='stretch', help=tip):
+                st.session_state['district'] = st.session_state['dash_district'] = d
+                st.session_state['goto'] = DASH
+                st.rerun()
+        home_footer()
+
+
+def home_footer():
     lc = cfg.get('llm', {})
-    st.markdown(f"**모델**: `{lc.get('provider')}` / `{lc.get('model')}`")
-    st.markdown('**LLM 연결**: ' + ('사용 가능' if HAS_LLM else '키 없음 → 샘플 모드'))
-    st.caption('모델 교체는 config.yaml의 provider·model·base_url·api_key_env를 바꾸면 됩니다. '
-               '판정은 LLM 없이 규칙(resolver.py)만으로 합니다.')
+    st.markdown('<div class="hm-sec"></div>', unsafe_allow_html=True)
+    st.caption(f"모델 {lc.get('model')} · " + ('AI 추출 사용' if HAS_LLM else '키 없음 → 샘플·간이 추출'),
+               help='모델 교체는 config.yaml의 provider·model·base_url·api_key_env를 바꾸면 됩니다. '
+                    '판정은 LLM 없이 규칙(resolver.py)만으로 합니다.')
+
+
+# ---------------- 💾 DB ----------------
+def page_db():
+    st.header('💾 DB')
+    view = st.segmented_control('DB 보기', DB_VIEWS, key='db_view', label_visibility='collapsed') or DB_VIEWS[0]
+    (page_docs if view == DB_VIEWS[0] else page_compare)()
+
+
+# ---------------- 화면 전환 ----------------
+def top_nav(page):
+    """처음 화면을 뺀 모든 화면 위에 메뉴 줄: [🏠 디딤돌] 대시보드 · 챗봇 · DB · 보고서 작성"""
+    st.session_state['top_nav'] = page  # 다른 화면에서 넘어와도 현재 화면이 눌린 상태로 보이게
+    c1, c2 = st.columns([1, 5], vertical_alignment='center')
+    if c1.button('🏠 디딤돌', key='tn_home', type='tertiary', help='처음 화면'):
+        st.session_state['goto'] = HOME
+        st.rerun()
+    c2.segmented_control('메뉴', NAV[1:], key='top_nav', label_visibility='collapsed',
+                         on_change=lambda: st.session_state.update(nav=st.session_state['top_nav'] or st.session_state['nav']))
+    st.markdown('<div class="tn-line"></div>', unsafe_allow_html=True)
+
 
 if 'goto' in st.session_state:
     st.session_state['nav'] = st.session_state.pop('goto')
-elif 'nav' not in st.session_state:
-    st.session_state['nav'] = NAV[0] if db.facts(con) else NAV[3]
-page = st.radio('화면', NAV, key='nav', horizontal=True, label_visibility='collapsed')
-{NAV[0]: page_dashboard, NAV[1]: page_compare, NAV[2]: page_chat, NAV[3]: page_docs, NAV[4]: page_report}[page]()
+st.session_state.setdefault('nav', HOME)
+st.session_state.setdefault('db_view', DB_VIEWS[0])
+page = st.session_state['nav']
+if page != HOME:
+    top_nav(page)
+{HOME: page_home, DASH: page_dashboard, CHAT: page_chat, DOCS: page_db, REPORT: page_report}[page]()

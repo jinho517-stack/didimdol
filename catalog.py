@@ -6,8 +6,29 @@ from pathlib import Path
 import llm
 
 
+LOCAL = Path(__file__).with_name('output') / 'local_districts.yaml'  # 화면에서 추가한 사업지구(산출물 폴더)
+
+
+def local_districts():
+    import yaml
+    if LOCAL.exists():
+        return yaml.safe_load(LOCAL.read_text(encoding='utf-8')) or []
+    return []
+
+
+def save_local_district(name, facilities, key=None):
+    """화면에서 새 사업지구 등록/수정. facilities: [{'name':…, 'type':…}]. config.yaml은 건드리지 않는다."""
+    import yaml
+    ds = [d for d in local_districts() if d['name'] != name]
+    ds.append({'name': name, 'key': key or re.sub(r'(지구|단지)$', '', name), 'facilities': facilities})
+    LOCAL.parent.mkdir(parents=True, exist_ok=True)
+    LOCAL.write_text(yaml.safe_dump(ds, allow_unicode=True, sort_keys=False), encoding='utf-8')
+
+
 def load(cfg=None):
-    cfg = cfg or llm.load_config()
+    cfg = dict(cfg or llm.load_config())
+    names = {d['name'] for d in cfg.get('districts', [])}
+    cfg['districts'] = list(cfg.get('districts', [])) + [d for d in local_districts() if d['name'] not in names]
     tpl, common = cfg.get('item_templates', {}), cfg.get('common_items', [])
     items, types = [], {}
     for d in cfg.get('districts', []):
@@ -54,6 +75,27 @@ def facility_type(cat, district, facility):
     if re.search(r'버스|BRT|대중교통', facility):
         return '대중교통'
     return '도로'
+
+
+def suggest_facilities(texts):
+    """새 지구 문서에서 사업명 후보 찾기: "ㅇ (○○도로) …", 표 첫 칸, "○○선/○○IC/○○센터" 같은 낱말."""
+    pat = r'[가-힣A-Za-z0-9·]+(?:\s[가-힣A-Za-z0-9·]+){0,3}?\s?(?:연결도로|도로확장|도로|확장|IC|교차로|선(?:\([^)]*\))?|BRT|환승센터|환승주차장|센터|버스\s?지원|지원)'
+    seen = {}
+    for t in texts:
+        for line in t.splitlines():
+            body = re.sub(r'^\[[^\]]+\]\s*', '', line)
+            cands = re.findall(r'\(([^()]{2,25}(?:\([^)]*\))?)\)', body)
+            if '|' in body:
+                cands.append(body.split('|')[0].strip())
+            for c in cands:
+                m = re.fullmatch(pat, c.strip())
+                if m and not re.search(r'\d{4}|억|km|㎡', c):
+                    seen[c.strip()] = seen.get(c.strip(), 0) + 1
+    out = []
+    for name, _ in sorted(seen.items(), key=lambda x: -x[1]):
+        if not any(name != o and name in o for o in seen):  # 더 긴 이름이 있으면 그쪽
+            out.append({'name': name, 'type': facility_type({'types': {}}, '', name)})
+    return out[:12]
 
 
 def entity_class(name):
